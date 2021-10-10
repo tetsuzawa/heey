@@ -1,23 +1,19 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"io"
+	"github.com/tetsuzawa/heey/requester"
 	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -32,11 +28,12 @@ const (
 // heey -k 10000 -i 1000 -l 5 http://target.com:6666/cpu_usage "hey -c 10 -n 100000 -q % 'http://example.com'"
 
 var (
-	m           = flag.String("m", "GET", "")
+	method      = flag.String("m", "GET", "")
 	body        = flag.String("d", "", "")
 	bodyFile    = flag.String("D", "", "")
 	accept      = flag.String("A", "", "")
 	contentType = flag.String("T", "text/plain", "")
+	hs          headerSlice
 	authHeader  = flag.String("a", "", "")
 	hostHeader  = flag.String("host", "", "")
 	userAgent   = flag.String("U", "", "")
@@ -65,7 +62,6 @@ func main() {
 		fmt.Fprint(os.Stderr, fmt.Sprintf(usage, runtime.NumCPU()))
 	}
 
-	var hs headerSlice
 	flag.Var(&hs, "H", "")
 
 	flag.Parse()
@@ -80,11 +76,17 @@ func main() {
 		<-c
 		cancel()
 	}()
+	if err := run(ctx); err != nil {
+		errAndExit(err.Error())
+	}
+}
+
+func run(ctx context.Context) error {
 
 	reporterUrl := flag.Arg(0)
 	cmd := flag.Arg(1)
 
-	method := strings.ToUpper(*m)
+	httpMethod := strings.ToUpper(*method)
 
 	// set content-type
 	header := make(http.Header)
@@ -94,7 +96,7 @@ func main() {
 	for _, h := range hs {
 		match, err := parseInputWithRegexp(h, headerRegexp)
 		if err != nil {
-			usageAndExit(err.Error())
+			return fmt.Errorf("failed to parse header: %w", err)
 		}
 		header.Set(match[1], match[2])
 	}
@@ -108,7 +110,7 @@ func main() {
 	if *authHeader != "" {
 		match, err := parseInputWithRegexp(*authHeader, authRegexp)
 		if err != nil {
-			usageAndExit(err.Error())
+			return fmt.Errorf("failed to parse auth header: %w", err)
 		}
 		username, password = match[1], match[2]
 	}
@@ -120,23 +122,23 @@ func main() {
 	if *bodyFile != "" {
 		slurp, err := ioutil.ReadFile(*bodyFile)
 		if err != nil {
-			errAndExit(err.Error())
+			return fmt.Errorf("failed to read body file: %w", err)
 		}
 		bodyAll = slurp
 	}
 
 	var proxyURL *url.URL
 	if *proxyAddr != "" {
-		var err error
+		var err  error
 		proxyURL, err = url.Parse(*proxyAddr)
 		if err != nil {
-			usageAndExit(err.Error())
+			return fmt.Errorf("proxy address is invalid: %w", err)
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, reporterUrl, nil)
+	req, err := http.NewRequestWithContext(ctx, httpMethod, reporterUrl, nil)
 	if err != nil {
-		usageAndExit(err.Error())
+		return fmt.Errorf("failed to create http request: %w", err)
 	}
 	req.ContentLength = int64(len(bodyAll))
 	if username != "" || password != "" {
@@ -174,16 +176,24 @@ func main() {
 		Proxy:              http.ProxyURL(proxyURL),
 	}
 	if *h2 {
-		http2.ConfigureTransport(tr)
+		err := http2.ConfigureTransport(tr)
+		if err != nil {
+			return fmt.Errorf("failed to configure http2 transport: %w", err)
+		}
 	} else {
 		tr.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 	}
 	client := &http.Client{Transport: tr, Timeout: time.Duration(*timeout) * time.Second}
+	if *disableRedirects {
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	}
 
 	cmds := strings.Split(cmd, " ")
 
 	// TODO validation
-	w := &Work{
+	w := &requester.Work{
 		Request:     req,
 		RequestBody: bodyAll,
 		Client:      client,
@@ -193,20 +203,22 @@ func main() {
 		InitialValue: *initialValue,
 		Interval:     *interval,
 		BufferLength: *bufferLength,
-		ReporterURL:  reporterUrl,
 		Macro:        *macro,
-		Cmd:          cmds[0],
-		CmdArgs:      cmds[1:],
+		ReporterURL:  reporterUrl,
+
+		Cmd:     cmds[0],
+		CmdArgs: cmds[1:],
 	}
 
 	err = w.Init()
 	if err != nil {
-		//TODO
+		return fmt.Errorf("failed to initialize worker: %w", err)
 	}
 	err = w.Run(ctx)
-	if err !=nil {
+	if err != nil {
+		return fmt.Errorf("failed to run: %w", err)
 	}
-
+	return nil
 }
 
 func errAndExit(msg string) {
@@ -243,163 +255,4 @@ func (h *headerSlice) String() string {
 func (h *headerSlice) Set(value string) error {
 	*h = append(*h, value)
 	return nil
-}
-
-type Work struct {
-	// Request is the request to be made.
-	Request *http.Request
-
-	RequestBody []byte
-
-	Client *http.Client
-
-	results chan *result
-
-	Gain         int
-	SetPoint     uint
-	Interval     uint
-	InitialValue int
-	BufferLength uint
-	ReporterURL  string
-	Macro        string
-	MacroIdx     int
-	Cmd          string
-	CmdArgs      []string
-
-	initOnce sync.Once
-}
-
-func (w *Work) GenHttpClient(ctx context.Context) (*http.Client, error) {
-	// TODO custom client
-	return http.DefaultClient, nil
-}
-
-func (w *Work) Run(ctx context.Context) error {
-	throttle := time.Tick(time.Duration(w.Interval) * time.Microsecond)
-	buffer := make([]uint, w.BufferLength)
-
-	controlValue := w.InitialValue
-	for {
-
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-			w.SetMacro(controlValue)
-			cmd := exec.CommandContext(ctx, w.Cmd, w.CmdArgs...)
-			err := cmd.Start()
-			if err != nil {
-				// TODO
-			}
-
-			for i := 0; i < int(w.BufferLength); i++ {
-				select {
-				case <-ctx.Done():
-					return nil
-				default:
-					req := cloneRequest(w.Request, w.RequestBody)
-					<-throttle
-					//w.makeRequest()
-					resp, err := w.Client.Do(req)
-					if err != nil {
-						// TODO
-					}
-					b, err := io.ReadAll(resp.Body)
-					if err != nil {
-						// TODO
-					}
-					resp.Body.Close()
-					observedValue, err := strconv.ParseUint(string(b), 10, 64)
-					if err != nil {
-						// TODO
-					}
-					if observedValue < 0 || 100 < observedValue {
-						// TODO
-					}
-					buffer[i] = uint(observedValue)
-				}
-			}
-
-			// TODO kill gracefully
-			err = cmd.Process.Kill()
-			if err != nil {
-				// TODO
-			}
-
-			//
-			var sum uint
-			for _, v := range buffer {
-				sum += v
-			}
-			average := uint(float64(sum) / float64(w.BufferLength))
-			errorValue := int(w.SetPoint) - int(average)
-			controlValue = w.Gain * errorValue
-		}
-	}
-}
-
-func (w *Work) makeRequest() {
-	req := cloneRequest(w.Request, w.RequestBody)
-	req = req.WithContext(req.Context())
-	var size int64
-	var code int
-	resp, err := w.Client.Do(req)
-	if err == nil {
-		size = resp.ContentLength
-		code = resp.StatusCode
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-	}
-	w.results <- &result{
-		statusCode:    code,
-		err:           err,
-		contentLength: size,
-	}
-}
-
-// cloneRequest returns a clone of the provided *http.Request.
-// The clone is a shallow copy of the struct and its Header map.
-func cloneRequest(r *http.Request, body []byte) *http.Request {
-	// shallow copy of the struct
-	r2 := new(http.Request)
-	*r2 = *r
-	// deep copy of the Header
-	r2.Header = make(http.Header, len(r.Header))
-	for k, s := range r.Header {
-		r2.Header[k] = append([]string(nil), s...)
-	}
-	if len(body) > 0 {
-		r2.Body = ioutil.NopCloser(bytes.NewReader(body))
-	}
-	return r2
-}
-
-type result struct {
-	err           error
-	statusCode    int
-	contentLength int64
-}
-
-
-func findIdx(sl []string, target string) (int, error) {
-	for idx, v := range sl {
-		if v == target {
-			return idx, nil
-		}
-	}
-	// TODO
-	return -1, fmt.Errorf("macro not found")
-}
-
-// Init initializes internal data-structures
-func (w *Work) Init() error {
-	var err error
-	w.initOnce.Do(func() {
-		w.MacroIdx, err = findIdx(w.CmdArgs, w.Macro)
-	})
-	return err
-}
-
-func (w *Work) SetMacro(controlValue int) {
-	w.CmdArgs[w.MacroIdx] = strconv.Itoa(controlValue)
 }
