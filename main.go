@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"github.com/tetsuzawa/heey/requester"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -17,6 +16,8 @@ import (
 	"time"
 
 	"golang.org/x/net/http2"
+
+	"github.com/tetsuzawa/heey/requester"
 )
 
 const (
@@ -39,12 +40,12 @@ var (
 	userAgent   = flag.String("U", "", "")
 	timeout     = flag.Int("t", 20, "")
 
-	gain         = flag.Int("k", 10000, "gain")
-	setPoint     = flag.Uint("s", 50, "set point")
+	kp           = flag.Int("kp", 10000, "proportional control gain")
+	sv           = flag.Uint("sv", 50, "set variable")
+	initialMV    = flag.Int("mv", 1000, "initial manipulative variable")
 	interval     = flag.Uint("i", 1000, "interval [ms]")
-	initialValue = flag.Int("v", 1000, "initial value")
 	bufferLength = flag.Uint("l", 5, "buffer length")
-	macro        = flag.String("macro", "%", "macro")
+	macro        = flag.String("macro", "%", "macro string")
 
 	h2 = flag.Bool("h2", false, "")
 
@@ -192,15 +193,14 @@ func run(ctx context.Context) error {
 
 	cmds := strings.Split(cmd, " ")
 
-	// TODO validation
-	w := &requester.Work{
+	w := &requester.Worker{
 		Request:     req,
 		RequestBody: bodyAll,
 		Client:      client,
 
-		Gain:         *gain,
-		SetPoint:     *setPoint,
-		InitialValue: *initialValue,
+		Kp:           *kp,
+		SV:           *sv,
+		InitialMV:    *initialMV,
 		Interval:     *interval,
 		BufferLength: *bufferLength,
 		Macro:        *macro,
@@ -214,6 +214,10 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize worker: %w", err)
 	}
+	if err := w.Validate(); err != nil {
+		return fmt.Errorf("worker validation error: %w", err)
+	}
+
 	err = w.Run(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to run: %w", err)
