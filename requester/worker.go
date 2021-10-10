@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -40,15 +41,15 @@ type Worker struct {
 	// The reporter URL is the URL for observing the output. The response must be 0 to 100 int plain text.
 	ReporterURL string
 
-	// Macro is Macro is a string that indicates a placeholder to replace the control value (mv).
-	Macro       string
-	macroIdx    int
+	// Macro is a placeholder to replace the control value (mv).
+	Macro    string
+	macroIdx int
 
 	// Cmd is a external command to be executed.
-	Cmd         string
+	Cmd string
 
 	// CmdArgs is the arguments of Cmd.
-	CmdArgs     []string
+	CmdArgs []string
 }
 
 // Init initializes internal data-structures
@@ -94,6 +95,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		default:
 			w.SetMacro(mv)
 			cmd := exec.CommandContext(ctx, w.Cmd, w.CmdArgs...)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			err := cmd.Start()
 			if err != nil {
 				return fmt.Errorf("failed to exec external command: %w", err)
@@ -102,6 +104,9 @@ func (w *Worker) Run(ctx context.Context) error {
 			for i := 0; i < int(w.BufferLength); i++ {
 				select {
 				case <-ctx.Done():
+					if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+						return fmt.Errorf("failed to kill external command: %w", err)
+					}
 					return nil
 				default:
 					<-tick
@@ -127,10 +132,8 @@ func (w *Worker) Run(ctx context.Context) error {
 				}
 			}
 
-			// TODO kill gracefully
-			err = cmd.Process.Kill()
-			if err != nil {
-				// TODO
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+				return fmt.Errorf("failed to kill external command: %w", err)
 			}
 
 			var sumPV uint
