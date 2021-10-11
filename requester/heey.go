@@ -50,13 +50,17 @@ type Worker struct {
 
 	// CmdArgs is the arguments of Cmd.
 	CmdArgs []string
+
+	Results chan State
 }
 
 // Init initializes internal data-structures
 func (w *Worker) Init() error {
+	w.Results = make(chan State)
 	for idx, v := range w.CmdArgs {
 		if v == w.Macro {
 			w.macroIdx = idx
+			return nil
 		}
 	}
 	return fmt.Errorf("macro string not found")
@@ -73,16 +77,13 @@ func (w *Worker) Validate() error {
 	if w.SV < 0 || 100 < w.SV {
 		return fmt.Errorf("SV must be in 0 to 100")
 	}
-	if w.InitialMV < 0 || 100 < w.InitialMV {
-		return fmt.Errorf("InitialMV must be in 0 to 100")
-	}
 	return nil
 }
 
 // Run is a function that performs proportional control to the target system.
 // It replaces mv with a macro and make the reporter URL response pv. dv is calculated by sv - pv.
 func (w *Worker) Run(ctx context.Context) error {
-	tick := time.Tick(time.Duration(w.Interval) * time.Microsecond)
+	tick := time.Tick(time.Duration(w.Interval) * time.Millisecond)
 	buffer := make([]uint, w.BufferLength)
 
 	// mv is manipulative Variable
@@ -98,7 +99,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			err := cmd.Start()
 			if err != nil {
-				return fmt.Errorf("failed to exec external command: %w", err)
+				return fmt.Errorf("failed to exec external command `%s`: %w", w.CmdArgs, err)
 			}
 
 			for i := 0; i < int(w.BufferLength); i++ {
@@ -108,9 +109,9 @@ func (w *Worker) Run(ctx context.Context) error {
 						return fmt.Errorf("failed to kill external command: %w", err)
 					}
 					return nil
+
 				default:
 					<-tick
-
 					req := cloneRequest(w.Request, w.RequestBody)
 					resp, err := w.Client.Do(req)
 					if err != nil {
@@ -129,10 +130,12 @@ func (w *Worker) Run(ctx context.Context) error {
 						return fmt.Errorf("process variable must be in 0 to 100: %w", err)
 					}
 					buffer[i] = uint(pv)
+					w.Results <- State{MV: mv, PV: uint(pv)}
 				}
 			}
 
-			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if err := cmd.Process.Kill(); err != nil {
+				//if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
 				return fmt.Errorf("failed to kill external command: %w", err)
 			}
 
@@ -143,7 +146,8 @@ func (w *Worker) Run(ctx context.Context) error {
 			averagePV := uint(float64(sumPV) / float64(w.BufferLength))
 
 			dv := int(w.SV) - int(averagePV)
-			mv = w.Kp * dv
+			mv = mv + w.Kp * dv
+
 		}
 	}
 }
@@ -168,4 +172,9 @@ func cloneRequest(r *http.Request, body []byte) *http.Request {
 		r2.Body = ioutil.NopCloser(bytes.NewReader(body))
 	}
 	return r2
+}
+
+type State struct {
+	MV int
+	PV uint
 }

@@ -56,13 +56,13 @@ var usage = `Usage: heey [options...] <reporter_url> "<external_command> <args>.
 
 Options:
 
-  -kp      Proportional control gain. Default is 1000
-  -sv      Set variable. heey performs proportional control so that pv becomes sv. 
-           sv must be in 0 to 100. Default is 50.
-  -mv      Initial manipulative variable. Default is 1000.
-  -i       Interval of observation [ms]. Default is 1000
-  -l       Buffer Length of observation. The observed value (pv) is the average value of the buffer.
-  - macro  Macro is the placeholder to replace the control value (mv). Default is '%'.
+  -kp     Proportional control gain. Default is 1000
+  -sv     Set variable. heey performs proportional control so that pv becomes sv. 
+          sv must be in 0 to 100. Default is 50.
+  -mv     Initial manipulative variable. Default is 1000.
+  -i      Interval of observation [ms]. Default is 1000
+  -l      Buffer Length of observation. The observed value (pv) is the average value of the buffer.
+  -macro  Macro is the placeholder to replace the control value (mv). Default is '%'.
   
 
   -m  HTTP method, one of GET, POST, PUT, DELETE, HEAD, OPTIONS.
@@ -245,6 +245,18 @@ func run(ctx context.Context) error {
 	if err := w.Validate(); err != nil {
 		return fmt.Errorf("worker validation error: %w", err)
 	}
+
+	go func(ctx context.Context) {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case r := <-w.Results:
+				fmt.Printf("mv=%03d, pv=%03d\n", r.MV, r.PV)
+			}
+
+		}
+	}(ctx)
 
 	err = w.Run(ctx)
 	if err != nil {
