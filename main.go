@@ -57,13 +57,13 @@ var usage = `Usage: heey [options...] <reporter_url> "<external_command> <args>.
 Options:
 
   -kp     Proportional control gain. Default is 1000
-  -sv     Set variable. heey performs proportional control so that pv becomes sv. 
+  -sv     Set variable. heey performs proportional control so that pv becomes sv.
           sv must be in 0 to 100. Default is 50.
   -mv     Initial manipulative variable. Default is 1000.
   -i      Interval of observation [ms]. Default is 1000
   -l      Buffer Length of observation. The observed value (pv) is the average value of the buffer.
   -macro  Macro is the placeholder to replace the control value (mv). Default is '%'.
-  
+
 
   -m  HTTP method, one of GET, POST, PUT, DELETE, HEAD, OPTIONS.
   -H  Custom HTTP header. You can specify as many as needed by repeating the flag.
